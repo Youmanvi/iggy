@@ -330,12 +330,17 @@ fn is_retryable_status(status: StatusCode) -> bool {
 
 /// Exponential backoff with full jitter.
 ///
-/// Cap grows as `base * 2^attempt`, clamped to 60 s. The actual sleep is
-/// a uniform random value in `[0, cap]`, so concurrent instances spread
+/// Cap grows as `base * 2^(attempt - 1)`, clamped to 60 s. The actual sleep
+/// is a uniform random value in `[0, cap]`, so concurrent instances spread
 /// their retries instead of thundering back together.
+///
+/// `attempt` is the 1-based total attempt count, matching every call site's
+/// already-incremented retry counter (`1` for the first retry, `2` for the
+/// second, ...).
 pub(crate) fn jittered_backoff(base: Duration, attempt: u32) -> Duration {
     const MAX: Duration = Duration::from_secs(60);
-    let cap = base.saturating_mul(2u32.saturating_pow(attempt)).min(MAX);
+    let exponent = attempt.saturating_sub(1);
+    let cap = base.saturating_mul(2u32.saturating_pow(exponent)).min(MAX);
     let cap_ms = cap.as_millis() as u64;
     Duration::from_millis(rand::rng().random_range(0..=cap_ms))
 }
@@ -422,6 +427,46 @@ mod tests {
         assert_eq!(result, "innocent\\\\");
         // Even count of backslashes, so none escapes the closing backtick.
         assert!(result.matches('\\').count().is_multiple_of(2));
+    }
+
+    #[test]
+    fn jittered_backoff_first_retry_never_exceeds_base_delay() {
+        let base = Duration::from_millis(200);
+
+        // `attempt = 1` is what every call site has after incrementing its
+        // retry counter for the first retry. The off-by-one bug doubled the
+        // cap here (`base * 2^1` instead of `base * 2^0`), so sampling many
+        // times and asserting the upper bound reliably catches a regression.
+        for _ in 0..500 {
+            assert!(jittered_backoff(base, 1) <= base);
+        }
+    }
+
+    #[test]
+    fn jittered_backoff_second_retry_never_exceeds_double_base_delay() {
+        let base = Duration::from_millis(200);
+
+        for _ in 0..500 {
+            assert!(jittered_backoff(base, 2) <= base * 2);
+        }
+    }
+
+    #[test]
+    fn jittered_backoff_treats_zero_like_one() {
+        let base = Duration::from_millis(200);
+
+        for _ in 0..500 {
+            assert!(jittered_backoff(base, 0) <= base);
+        }
+    }
+
+    #[test]
+    fn jittered_backoff_caps_at_sixty_seconds() {
+        let base = Duration::from_secs(1);
+
+        for _ in 0..500 {
+            assert!(jittered_backoff(base, 30) <= Duration::from_secs(60));
+        }
     }
 
     fn test_client(database: &str, table: &str, format_name: &str) -> ClickHouseClient {

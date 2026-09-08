@@ -542,7 +542,7 @@ async fn sleep_after_nack(consecutive_nacks: &AtomicU32, policy: BatchPolicy) {
 }
 
 fn nack_retry_delay(consecutive_nacks: &AtomicU32, policy: BatchPolicy) -> Duration {
-    let attempt = consecutive_nacks.load(Ordering::Relaxed).saturating_sub(1);
+    let attempt = consecutive_nacks.load(Ordering::Relaxed);
     exponential_backoff(
         policy.nack_retry_delay,
         attempt,

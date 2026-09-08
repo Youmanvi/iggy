@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose};
 use bytes::Bytes;
 use humantime::Duration as HumanDuration;
-use iggy_connector_sdk::retry::{exponential_backoff, jitter};
+use iggy_connector_sdk::retry::retry_backoff;
 use iggy_connector_sdk::{
     ConsumedMessage, Error, MessagesMetadata, Payload, Sink, TopicMetadata, sink_connector,
 };
@@ -433,14 +433,7 @@ impl DorisSink {
                 return Err(error);
             }
 
-            // `attempt` counts completed attempts. Subtract one so the first
-            // retry waits exactly the configured base delay (base * 2^0).
-            let delay = jitter(exponential_backoff(
-                connected.retry_delay,
-                attempt - 1,
-                connected.max_retry_delay,
-            ))
-            .min(connected.max_retry_delay);
+            let delay = retry_backoff(connected.retry_delay, attempt, connected.max_retry_delay);
             warn!(
                 "Doris sink ID {} transient Stream Load failure on attempt {attempt}/{} (label={label}): {error}; retrying in {delay:?}",
                 self.id, connected.max_retries

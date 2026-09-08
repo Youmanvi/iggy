@@ -29,6 +29,7 @@
 //! - [`parse_duration`] — humantime duration parsing with fallback
 //! - [`jitter`] — ±20 % random jitter for retry delays
 //! - [`exponential_backoff`] — capped exponential backoff
+//! - [`retry_backoff`] — `exponential_backoff` + `jitter`, re-clamped to `max_delay`
 //! - [`parse_retry_after`] — HTTP `Retry-After` header parsing
 
 use anyhow::anyhow;
@@ -160,15 +161,31 @@ pub fn jitter(base: Duration) -> Duration {
     Duration::from_millis(millis.saturating_sub(jitter_range).saturating_add(delta))
 }
 
-/// True exponential backoff: `base × 2^attempt`, capped at `max_delay`.
+/// True exponential backoff: `base × 2^(attempt - 1)`, capped at `max_delay`.
+///
+/// `attempt` is the 1-based total attempt count — the value every call site
+/// already has on hand from an incremented retry counter (`1` for the first
+/// retry, `2` for the second, ...). `attempt = 0` is treated the same as `1`
+/// (i.e. `base`), so callers never see a panic or an unexpectedly-huge delay
+/// from passing a not-yet-incremented counter.
 pub fn exponential_backoff(base: Duration, attempt: u32, max_delay: Duration) -> Duration {
-    let factor = 2u64.saturating_pow(attempt);
+    let exponent = attempt.saturating_sub(1);
+    let factor = 2u64.saturating_pow(exponent);
     let millis = base
         .as_millis()
         .saturating_mul(factor as u128)
         .min(max_delay.as_millis());
     let millis_u64 = u64::try_from(millis).unwrap_or(u64::MAX);
     Duration::from_millis(millis_u64)
+}
+
+/// [`exponential_backoff`] with [`jitter`] applied, re-clamped to `max_delay`.
+///
+/// `jitter` can push an already-capped delay up to 20 % past `max_delay`;
+/// this is the shared helper call sites should use instead of composing
+/// `jitter(exponential_backoff(...))` by hand, so the cap always holds.
+pub fn retry_backoff(base: Duration, attempt: u32, max_delay: Duration) -> Duration {
+    jitter(exponential_backoff(base, attempt, max_delay)).min(max_delay)
 }
 
 /// Parse a `Retry-After` header value (integer seconds).
@@ -273,11 +290,7 @@ impl Middleware for HttpRetryMiddleware {
                         // Consume the error body for logging, then retry.
                         let body_text = response.text().await.unwrap_or_default();
                         let delay = retry_after.unwrap_or_else(|| {
-                            jitter(exponential_backoff(
-                                self.retry_delay,
-                                attempts,
-                                self.max_delay,
-                            ))
+                            retry_backoff(self.retry_delay, attempts, self.max_delay)
                         });
                         warn!(
                             "{} transient error {status} \
@@ -305,11 +318,7 @@ impl Middleware for HttpRetryMiddleware {
                 Err(e) => {
                     attempts += 1;
                     if attempts < self.max_retries {
-                        let delay = jitter(exponential_backoff(
-                            self.retry_delay,
-                            attempts,
-                            self.max_delay,
-                        ));
+                        let delay = retry_backoff(self.retry_delay, attempts, self.max_delay);
                         warn!(
                             "{} network error (attempt {attempts}/{}): {e}. \
                              Retrying in {delay:?}...",
@@ -430,17 +439,60 @@ pub async fn check_connectivity_with_retry(
                     );
                     return Err(e);
                 }
-                let backoff = jitter(exponential_backoff(
-                    cfg.retry_delay,
-                    attempt,
-                    cfg.open_retry_max_delay,
-                ));
+                let backoff = retry_backoff(cfg.retry_delay, attempt, cfg.open_retry_max_delay);
                 tracing::warn!(
                     "{connector_label} health check failed \
                      (attempt {attempt}/{max_open_retries}) \
                      for connector ID: {connector_id}. Retrying in {backoff:?}: {e}"
                 );
                 tokio::time::sleep(backoff).await;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod backoff_tests {
+    use super::*;
+
+    #[test]
+    fn exponential_backoff_first_retry_is_base_delay() {
+        let base = Duration::from_millis(100);
+        let max_delay = Duration::from_secs(10);
+
+        // `attempt = 1` is what every call site naturally has after
+        // incrementing a retry counter for the first retry.
+        assert_eq!(exponential_backoff(base, 1, max_delay), base);
+        assert_eq!(exponential_backoff(base, 2, max_delay), base * 2);
+        assert_eq!(exponential_backoff(base, 3, max_delay), base * 4);
+    }
+
+    #[test]
+    fn exponential_backoff_treats_zero_like_one() {
+        let base = Duration::from_millis(100);
+        let max_delay = Duration::from_secs(10);
+
+        assert_eq!(exponential_backoff(base, 0, max_delay), base);
+    }
+
+    #[test]
+    fn exponential_backoff_caps_at_max_delay() {
+        let base = Duration::from_millis(100);
+        let max_delay = Duration::from_millis(250);
+
+        assert_eq!(exponential_backoff(base, 10, max_delay), max_delay);
+    }
+
+    #[test]
+    fn retry_backoff_never_exceeds_max_delay() {
+        let base = Duration::from_millis(100);
+        let max_delay = Duration::from_millis(250);
+
+        // Run enough samples that ±20% jitter on the capped value would
+        // overshoot at least once if `retry_backoff` didn't re-clamp.
+        for attempt in 1..=10 {
+            for _ in 0..200 {
+                assert!(retry_backoff(base, attempt, max_delay) <= max_delay);
             }
         }
     }
