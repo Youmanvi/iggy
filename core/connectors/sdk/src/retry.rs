@@ -452,11 +452,11 @@ pub async fn check_connectivity_with_retry(
 }
 
 #[cfg(test)]
-mod backoff_tests {
+mod tests {
     use super::*;
 
     #[test]
-    fn exponential_backoff_first_retry_is_base_delay() {
+    fn given_successive_attempts_when_computing_exponential_backoff_should_double_each_time() {
         let base = Duration::from_millis(100);
         let max_delay = Duration::from_secs(10);
 
@@ -468,7 +468,7 @@ mod backoff_tests {
     }
 
     #[test]
-    fn exponential_backoff_treats_zero_like_one() {
+    fn given_zero_attempt_when_computing_exponential_backoff_should_treat_it_like_first_retry() {
         let base = Duration::from_millis(100);
         let max_delay = Duration::from_secs(10);
 
@@ -476,7 +476,7 @@ mod backoff_tests {
     }
 
     #[test]
-    fn exponential_backoff_caps_at_max_delay() {
+    fn given_large_attempt_when_computing_exponential_backoff_should_cap_at_max_delay() {
         let base = Duration::from_millis(100);
         let max_delay = Duration::from_millis(250);
 
@@ -484,7 +484,7 @@ mod backoff_tests {
     }
 
     #[test]
-    fn retry_backoff_never_exceeds_max_delay() {
+    fn given_capped_delay_when_applying_retry_backoff_should_never_exceed_max_delay() {
         let base = Duration::from_millis(100);
         let max_delay = Duration::from_millis(250);
 
