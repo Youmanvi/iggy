@@ -50,6 +50,7 @@ mod benchmark;
 pub(crate) mod configs;
 pub(crate) mod context;
 pub(crate) mod error;
+mod instance_guard;
 mod log;
 mod manager;
 pub(crate) mod metrics;

@@ -20,6 +20,7 @@ use crate::SinkApi;
 use crate::configs::connectors::{ConfigFormat, ConnectorsConfigProvider, SinkConfig};
 use crate::context::RuntimeContext;
 use crate::error::RuntimeError;
+use crate::instance_guard::PluginInstanceGuard;
 use crate::metrics::Metrics;
 use crate::sink;
 use dashmap::DashMap;
@@ -208,23 +209,36 @@ impl SinkManager {
             plugin_id,
         )?;
         info!("Sink connector with ID: {plugin_id} for plugin: {key} initialized successfully.");
+        // Armed from here until the id is recorded below. `PluginInstanceGuard`
+        // carries why that window strands the instance.
+        let instance_guard = PluginInstanceGuard::for_sink(container.clone(), plugin_id, key);
 
-        let consumers = sink::setup_sink_consumers(key, config, iggy_client).await?;
+        let consumers = match sink::setup_sink_consumers(key, config, iggy_client).await {
+            Ok(consumers) => consumers,
+            Err(error) => {
+                instance_guard.close().await;
+                return Err(error);
+            }
+        };
 
         let callback = container.iggy_sink_consume;
-        let (shutdown_tx, task_handles) = sink::spawn_consume_tasks(
-            plugin_id,
-            key,
-            consumers,
-            callback,
-            config.verbose,
-            config.benchmark,
-            metrics,
-            context.clone(),
-        );
 
+        // The lock is taken before the spawn so nothing can await between
+        // starting the consume tasks and recording the id they run under. A
+        // cancellation in that gap would let the guard close the instance
+        // underneath tasks that keep calling into it.
         {
             let mut details = details.lock().await;
+            let (shutdown_tx, task_handles) = sink::spawn_consume_tasks(
+                plugin_id,
+                key,
+                consumers,
+                callback,
+                config.verbose,
+                config.benchmark,
+                metrics,
+                context.clone(),
+            );
             details.info.id = plugin_id;
             details.info.status = ConnectorStatus::Running;
             details.info.last_error = None;
@@ -233,6 +247,8 @@ impl SinkManager {
             details.task_handles = task_handles;
             metrics.increment_sinks_running();
         }
+        // `details.info.id` now names this instance, so a later stop reaches it.
+        instance_guard.disarm();
 
         Ok(())
     }

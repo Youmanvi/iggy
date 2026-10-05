@@ -32,7 +32,7 @@ pub struct ConnectorLabels {
     pub connector_type: ConnectorType,
 }
 
-#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum ConnectorType {
     Source,
     Sink,
