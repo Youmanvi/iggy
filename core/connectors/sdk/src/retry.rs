@@ -111,18 +111,25 @@ impl CircuitBreaker {
     /// operation). Transitions to half-open automatically once the cool-down
     /// has elapsed.
     pub async fn is_open(&self) -> bool {
+        self.remaining_cool_down().await.is_some()
+    }
+
+    /// Returns how long the circuit stays open, or `None` if it is closed.
+    /// Lets callers sleep until the next probe instead of waking repeatedly
+    /// during the cool-down. Transitions to half-open the same way as
+    /// [`is_open`](Self::is_open) once the cool-down has elapsed.
+    pub async fn remaining_cool_down(&self) -> Option<Duration> {
         let mut s = self.state.lock().await;
-        match s.open_until {
-            None => false,
-            Some(deadline) if tokio::time::Instant::now() < deadline => true,
-            Some(_) => {
-                // Cool-down elapsed: half-open — let one probe through.
-                s.open_until = None;
-                s.consecutive_failures = 0;
-                info!("Circuit breaker entering HALF-OPEN state.");
-                false
-            }
+        let deadline = s.open_until?;
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if !remaining.is_zero() {
+            return Some(remaining);
         }
+        // Cool-down elapsed: half-open — let one probe through.
+        s.open_until = None;
+        s.consecutive_failures = 0;
+        info!("Circuit breaker entering HALF-OPEN state.");
+        None
     }
 }
 
@@ -632,6 +639,43 @@ mod tests {
                 Ok(call)
             })
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn given_a_closed_circuit_should_report_no_cool_down() {
+        let breaker = CircuitBreaker::new(2, Duration::from_secs(30));
+        breaker.record_failure().await;
+
+        assert_eq!(breaker.remaining_cool_down().await, None);
+        assert!(!breaker.is_open().await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn given_an_open_circuit_should_report_the_time_left_until_half_open() {
+        let breaker = CircuitBreaker::new(1, Duration::from_secs(30));
+        breaker.record_failure().await;
+        tokio::time::advance(Duration::from_secs(10)).await;
+
+        assert_eq!(
+            breaker.remaining_cool_down().await,
+            Some(Duration::from_secs(20))
+        );
+        assert!(breaker.is_open().await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn given_an_elapsed_cool_down_should_go_half_open_and_reset_failures() {
+        let breaker = CircuitBreaker::new(2, Duration::from_secs(30));
+        breaker.record_failure().await;
+        breaker.record_failure().await;
+        tokio::time::advance(Duration::from_secs(30)).await;
+
+        assert_eq!(breaker.remaining_cool_down().await, None);
+        breaker.record_failure().await;
+        assert!(
+            !breaker.is_open().await,
+            "half-open must reset the failure count, so one failure stays below the threshold"
+        );
     }
 
     #[tokio::test(start_paused = true)]
