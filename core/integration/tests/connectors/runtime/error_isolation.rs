@@ -444,3 +444,63 @@ async fn given_sink_with_missing_stream_when_runtime_starts_should_expose_iggy_e
         "Healthy sibling sink should have no last_error"
     );
 }
+
+#[iggy_harness(
+    server(connectors_runtime(
+        config_path = "tests/connectors/runtime/sink_missing_stream.toml"
+    )),
+    seed = seeds::connector_stream
+)]
+async fn given_sink_with_missing_stream_when_restarted_should_close_the_new_instance(
+    harness: &TestHarness,
+) {
+    // A restart opens a fresh plugin instance before setting up consumers, so a
+    // missing stream fails after the open. The new id is not recorded yet at
+    // that point, and nothing could close the instance afterwards.
+    let runtime = harness
+        .connectors_runtime()
+        .expect("connector runtime should be available");
+    let api_address = runtime.http_url();
+    let http_client = Client::new();
+
+    assert_runtime_healthy(&http_client, &api_address).await;
+
+    let response = http_client
+        .post(format!("{api_address}/sinks/stdout_missing_stream/restart"))
+        .send()
+        .await
+        .expect("restart request should be sent");
+    assert!(
+        !response.status().is_success(),
+        "a restart whose consumer setup fails must report the failure, got {}",
+        response.status()
+    );
+
+    let opened_prefix = "Sink connector with ID: ";
+    let opened_suffix = " for plugin: stdout_missing_stream initialized successfully.";
+    let mut logs = String::new();
+    let closed = timeout(Duration::from_secs(10), async {
+        loop {
+            let (stdout, stderr) = runtime.collect_logs();
+            logs = format!("{stdout}\n{stderr}");
+            let reopened_id = logs
+                .lines()
+                .filter_map(|line| line.split_once(opened_prefix))
+                .filter_map(|(_, rest)| rest.split_once(opened_suffix))
+                .map(|(id, _)| id.to_owned())
+                .next_back();
+            if let Some(id) = reopened_id
+                && logs.contains(&format!("Stdout sink connector with ID: {id} is closed."))
+            {
+                return;
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await;
+
+    assert!(
+        closed.is_ok(),
+        "the instance opened by the failed restart was never closed, runtime logs:\n{logs}"
+    );
+}
