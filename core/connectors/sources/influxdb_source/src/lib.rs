@@ -481,15 +481,12 @@ impl Source for InfluxDbSource {
                 }
             };
         }
-        if self.circuit_breaker.is_open().await {
+        if let Some(remaining) = self.circuit_breaker.remaining_cool_down().await {
             warn!(
-                "{CONNECTOR_NAME} ID: {} — circuit breaker is OPEN. Skipping poll.",
+                "{CONNECTOR_NAME} ID: {} — circuit breaker is OPEN. Skipping poll for {remaining:?}.",
                 self.id
             );
-            // TODO: sleep for the CB's remaining cool-down duration rather than
-            // poll_interval to avoid wakeup churn. Requires CircuitBreaker to
-            // expose a remaining_cool_down() method (SDK change).
-            tokio::time::sleep(self.poll_interval).await;
+            tokio::time::sleep(remaining).await;
             return Ok(ProducedMessages {
                 schema: Schema::Json,
                 messages: vec![],
@@ -1519,7 +1516,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn poll_returns_empty_when_circuit_is_open() {
         let config = match make_v2_config() {
             InfluxDbSourceConfig::V2(mut c) => {
@@ -1534,9 +1531,15 @@ mod tests {
         source.circuit_breaker.record_failure().await;
         assert!(source.circuit_breaker.is_open().await);
 
+        let started = tokio::time::Instant::now();
         let result = source.poll().await;
         assert!(result.is_ok());
         assert!(result.unwrap().messages.is_empty());
+        assert!(
+            started.elapsed() >= Duration::from_secs(60),
+            "poll must sleep out the cool-down rather than the 1ms poll interval"
+        );
+        assert!(!source.circuit_breaker.is_open().await);
     }
 
     #[tokio::test]
