@@ -331,7 +331,7 @@ fn is_retryable_status(status: StatusCode) -> bool {
 /// Exponential backoff with full jitter before retry number `retry` (1-based).
 ///
 /// Cap grows as `base * 2^(retry - 1)`, clamped to 60 s, so the first retry
-/// draws from `[0, base]` as the `retry_delay` config field documents. The
+/// draws from `[0, base]`, matching the SDK's `retry_backoff` convention. The
 /// actual sleep is a uniform random value in `[0, cap]`, so concurrent
 /// instances spread their retries instead of thundering back together.
 pub(crate) fn jittered_backoff(base: Duration, retry: u32) -> Duration {
@@ -532,7 +532,9 @@ mod tests {
     fn given_large_retry_number_jittered_backoff_should_not_exceed_sixty_seconds() {
         let base = Duration::from_secs(1);
         for retry in [7, 8, 32, u32::MAX] {
-            assert!(jittered_backoff(base, retry) <= Duration::from_secs(60));
+            for _ in 0..1_000 {
+                assert!(jittered_backoff(base, retry) <= Duration::from_secs(60));
+            }
         }
     }
 }

@@ -49,7 +49,8 @@ pub struct ClickHouseSinkConfig {
     pub string_format: Option<StringFormat>,
     pub timeout_seconds: Option<u64>,
     pub max_retries: Option<u32>,
-    /// Delay between retry attempts, in seconds.
+    /// Base for the jittered exponential retry delay, in seconds. The first
+    /// retry waits up to this long.
     pub retry_delay: Option<u64>,
     pub verbose_logging: Option<bool>,
 }
