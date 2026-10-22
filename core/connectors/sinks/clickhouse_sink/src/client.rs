@@ -28,6 +28,7 @@
 use crate::schema::{Column, parse_type};
 use bytes::Bytes;
 use iggy_connector_sdk::Error;
+use iggy_connector_sdk::retry::exponential_backoff;
 use rand::RngExt;
 use reqwest::StatusCode;
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
@@ -336,8 +337,7 @@ fn is_retryable_status(status: StatusCode) -> bool {
 /// instances spread their retries instead of thundering back together.
 pub(crate) fn jittered_backoff(base: Duration, retry: u32) -> Duration {
     const MAX: Duration = Duration::from_secs(60);
-    let factor = 2u32.saturating_pow(retry.saturating_sub(1));
-    let cap = base.saturating_mul(factor).min(MAX);
+    let cap = exponential_backoff(base, retry.saturating_sub(1), MAX);
     let cap_ms = cap.as_millis() as u64;
     Duration::from_millis(rand::rng().random_range(0..=cap_ms))
 }
