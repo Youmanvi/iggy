@@ -328,14 +328,16 @@ fn is_retryable_status(status: StatusCode) -> bool {
     ) || status.is_server_error()
 }
 
-/// Exponential backoff with full jitter.
+/// Exponential backoff with full jitter before retry number `retry` (1-based).
 ///
-/// Cap grows as `base * 2^attempt`, clamped to 60 s. The actual sleep is
-/// a uniform random value in `[0, cap]`, so concurrent instances spread
-/// their retries instead of thundering back together.
-pub(crate) fn jittered_backoff(base: Duration, attempt: u32) -> Duration {
+/// Cap grows as `base * 2^(retry - 1)`, clamped to 60 s, so the first retry
+/// draws from `[0, base]` as the `retry_delay` config field documents. The
+/// actual sleep is a uniform random value in `[0, cap]`, so concurrent
+/// instances spread their retries instead of thundering back together.
+pub(crate) fn jittered_backoff(base: Duration, retry: u32) -> Duration {
     const MAX: Duration = Duration::from_secs(60);
-    let cap = base.saturating_mul(2u32.saturating_pow(attempt)).min(MAX);
+    let factor = 2u32.saturating_pow(retry.saturating_sub(1));
+    let cap = base.saturating_mul(factor).min(MAX);
     let cap_ms = cap.as_millis() as u64;
     Duration::from_millis(rand::rng().random_range(0..=cap_ms))
 }
@@ -506,5 +508,31 @@ mod tests {
             client.insert_query,
             "INSERT INTO `my``db`.`ta``ble` FORMAT JSONEachRow"
         );
+    }
+
+    #[test]
+    fn given_first_retry_jittered_backoff_should_stay_within_base_delay() {
+        let base = Duration::from_millis(100);
+        for _ in 0..1_000 {
+            assert!(jittered_backoff(base, 1) <= base);
+        }
+    }
+
+    #[test]
+    fn given_retry_number_jittered_backoff_should_double_cap_per_retry() {
+        let base = Duration::from_millis(100);
+        for (retry, cap) in [(2, 200), (3, 400), (4, 800)] {
+            for _ in 0..1_000 {
+                assert!(jittered_backoff(base, retry) <= Duration::from_millis(cap));
+            }
+        }
+    }
+
+    #[test]
+    fn given_large_retry_number_jittered_backoff_should_not_exceed_sixty_seconds() {
+        let base = Duration::from_secs(1);
+        for retry in [7, 8, 32, u32::MAX] {
+            assert!(jittered_backoff(base, retry) <= Duration::from_secs(60));
+        }
     }
 }

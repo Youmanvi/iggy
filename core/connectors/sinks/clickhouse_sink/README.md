@@ -163,8 +163,8 @@ string_format = "csv"
 
 ## Reliability
 
-Insert requests retry HTTP 408, 429, and 5xx responses, plus network and timeout errors. Other unsuccessful HTTP statuses fail immediately. `max_retries` is the total attempt limit, with at least one attempt even when set to `0`. Before retry number `n` (starting at 1), the delay is sampled from zero through `min(retry_delay * 2^n, 60)` seconds.
-With the defaults, there are at most three attempts and the first retry waits between zero and two seconds. The startup ping and, in `row_binary` mode, schema fetch use the same limit and backoff but retry every error.
+Insert requests retry HTTP 408, 429, and 5xx responses, plus network and timeout errors. Other unsuccessful HTTP statuses fail immediately. `max_retries` is the total attempt limit, with at least one attempt even when set to `0`. Before retry number `n` (starting at 1), the delay is sampled from zero through `min(retry_delay * 2^(n-1), 60)` seconds, so the first retry waits at most `retry_delay`.
+With the defaults, there are at most three attempts and the first retry waits between zero and one second. The startup ping and, in `row_binary` mode, schema fetch use the same limit and backoff but retry every error.
 
 On shutdown the connector logs the total number of messages processed.
 
